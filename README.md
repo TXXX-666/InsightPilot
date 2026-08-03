@@ -19,22 +19,32 @@ InsightPilot 将自然语言调研问题编排为一条可追溯的工作流：�
 ## 系统架构
 
 ```mermaid
-flowchart LR
-    U["调研目标"] --> API["FastAPI 任务接口"]
-    API --> Q["SQLite 队列与 Worker"]
-    Q --> P["Search Planner"]
-    P --> S["Tavily 实时检索"]
-    P --> A["arXiv MCP（可选）"]
-    S --> F["抓取与清洗来源"]
+flowchart TD
+    U["用户输入调研目标"] --> API["FastAPI：创建任务"]
+    API --> DB["SQLite：任务、事件、来源、证据、主张"]
+    API --> W["后台 Worker / Supervisor"]
+
+    W --> P["Search Planner：拆解查询词"]
+    P --> S["Web Researcher：Tavily 实时检索"]
+    P --> A["Academic Researcher：arXiv MCP（学术任务）"]
+
+    S --> F["网页抓取与清洗"]
     A --> F
-    F --> E["Document Analyst：持久化证据"]
-    E --> V["Evidence Verifier：主张-证据关联"]
-    V --> C["Critic"]
-    C --> R["Report Writer"]
-    R --> O["Markdown / DOCX / PDF"]
-    Q --> M["Monitor Agent"]
-    M --> N["人工审批后的通知"]
-    API --> UI["Streamlit + SSE"]
+    F --> D["Document Analyst：提取、去重、持久化证据"]
+
+    D --> V["Evidence Verifier：建立主张-证据关联"]
+    V --> C["Critic：识别偏差、风险与未知项"]
+    C --> R["Report Writer：生成引用报告"]
+    R --> X["Markdown / Word / PDF"]
+
+    DB --> UI["Streamlit 前端"]
+    W --> SSE["SSE 实时事件流"]
+    SSE --> UI
+
+    DB --> M["Monitor Agent：定时重新调研"]
+    M --> G["变化检测"]
+    G --> AP["人工审批"]
+    AP --> N["飞书通知"]
 ```
 
 ## 调研流程
