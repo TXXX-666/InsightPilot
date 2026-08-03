@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "modelscope-tavily": {
+      "type": "streamable-http",
+      "url": "${MODELSCOPE_TAVILY_MCP_URL}"
+    },
+    "modelscope-arxiv": {
+      "type": "streamable-http",
+      "url": "${MODELSCOPE_ARXIV_MCP_URL}"
+    },
+    "local-fetch": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "local-filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "E:\\codex项目\\InsightPilot"]
+    }
+  }
+}
