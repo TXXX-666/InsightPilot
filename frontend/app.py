@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import os
 from datetime import datetime
 
@@ -9,11 +10,22 @@ import streamlit as st
 
 
 API = os.getenv("INSIGHTPILOT_API_URL", "http://127.0.0.1:8000")
+EXPECTED_API_TOKEN = os.getenv("INSIGHTPILOT_API_TOKEN", "").strip()
 
 
 def api(method: str, path: str, **kwargs):
     try:
-        response = httpx.request(method, API + path, timeout=30, **kwargs)
+        headers = dict(kwargs.pop("headers", {}))
+        api_token = st.session_state.get("insightpilot_api_token", "")
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+        response = httpx.request(
+            method,
+            API + path,
+            timeout=30,
+            headers=headers,
+            **kwargs,
+        )
         response.raise_for_status()
         return response.json()
     except Exception as exc:
@@ -22,6 +34,30 @@ def api(method: str, path: str, **kwargs):
 
 
 st.set_page_config(page_title="InsightPilot", page_icon="🔎", layout="wide")
+
+if EXPECTED_API_TOKEN and not st.session_state.get("insightpilot_authenticated"):
+    st.title("InsightPilot")
+    st.caption("请输入访问令牌后进入研究平台")
+    with st.form("insightpilot-login"):
+        supplied_token = st.text_input("访问令牌", type="password")
+        if st.form_submit_button("登录", type="primary"):
+            if supplied_token and hmac.compare_digest(
+                supplied_token, EXPECTED_API_TOKEN
+            ):
+                st.session_state["insightpilot_authenticated"] = True
+                st.session_state["insightpilot_api_token"] = supplied_token
+                st.rerun()
+            else:
+                st.error("访问令牌不正确")
+    st.stop()
+
+if EXPECTED_API_TOKEN:
+    with st.sidebar:
+        if st.button("退出登录"):
+            st.session_state.pop("insightpilot_authenticated", None)
+            st.session_state.pop("insightpilot_api_token", None)
+            st.rerun()
+
 st.title("InsightPilot · 实时智能情报研究平台")
 st.caption("真实联网检索 · 多智能体核验 · 证据图 · 定时监控 · 人工审批")
 

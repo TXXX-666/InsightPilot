@@ -16,3 +16,9 @@ reports/
 playwright-report/
 *.log
 .DS_Store
+
+# Local interview handbook and its render/QA artifacts
+docs/InsightPilot项目面试复习手册.docx
+scripts/build_interview_manual.py
+.docx_qa/
+.docx_qa_v2/

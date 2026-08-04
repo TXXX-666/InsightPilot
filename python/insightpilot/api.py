@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from .api_auth import require_api_access
 from .database import Database
 from .research_pipeline import evidence_graph
 from .runtime import ProductRuntime, TERMINAL
@@ -42,7 +43,12 @@ async def lifespan(_: FastAPI):
         await runtime.stop()
 
 
-app = FastAPI(title="InsightPilot API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="InsightPilot API",
+    version="0.1.0",
+    lifespan=lifespan,
+    dependencies=[Depends(require_api_access)],
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8501", "http://localhost:8501"],
@@ -73,7 +79,7 @@ class ApprovalDecision(BaseModel):
 async def health():
     return {
         "status": "running",
-        "database": {"status": "ready", "path": str(settings.db_path)},
+        "database": {"status": "ready"},
         "queue": {"pending": runtime.queue.qsize(), "workers": len(runtime.worker_tasks)},
         "providers": {
             "search": await runtime.pipeline.search.health(),

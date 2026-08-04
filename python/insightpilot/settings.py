@@ -29,6 +29,7 @@ class Settings:
     tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     feishu_webhook_url: str = os.getenv("FEISHU_WEBHOOK_URL", "")
     api_url: str = os.getenv("INSIGHTPILOT_API_URL", "http://127.0.0.1:8000")
+    api_token: str = os.getenv("INSIGHTPILOT_API_TOKEN", "").strip()
     host: str = os.getenv("INSIGHTPILOT_HOST", "127.0.0.1")
     port: int = _int("INSIGHTPILOT_PORT", 8000)
     workers: int = _int("INSIGHTPILOT_WORKERS", 2)

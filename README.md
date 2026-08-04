@@ -87,6 +87,9 @@ LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-flash
 TAVILY_API_KEY=你的_Tavily_Key
 
+# 本机单人使用可留空；局域网或公网部署必须设置为高强度随机值。
+INSIGHTPILOT_API_TOKEN=
+
 # 推理模型的该预算包含内部推理 Token。
 INSIGHTPILOT_REPORT_MAX_TOKENS=8192
 
@@ -95,6 +98,8 @@ MODELSCOPE_ARXIV_MCP_URL=
 ```
 
 若使用其他 OpenAI-compatible 服务，只需将 `LLM_BASE_URL` 和 `LLM_MODEL` 替换为该服务实际支持的值。
+
+`INSIGHTPILOT_API_TOKEN` 配置后，Streamlit 会先显示登录页，FastAPI 的全部业务接口也会校验同一个 Bearer Token。未配置时，API 只接受来自本机回环地址的请求。可使用密码管理器生成至少 32 字节的随机值，不要把 Token 写入 README、截图或提交记录。
 
 ### 启动
 
@@ -105,6 +110,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-all.ps1
 - 前端界面：`http://127.0.0.1:8501`
 - API 文档：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/api/v1/health`
+
+配置 Token 后，直接调用 API 时需要携带请求头：
+
+```text
+Authorization: Bearer <INSIGHTPILOT_API_TOKEN>
+```
 
 ### 可选依赖
 
@@ -181,7 +192,9 @@ tests/                    产品与 MCP 集成测试
 
 ## 安全与仓库卫生
 
-`.env`、`.mcp.json`、`.venv/`、`data/`、`reports/`、Streamlit 密钥文件和 IDE 配置均已被 `.gitignore` 忽略。API Key、Webhook URL 和托管 MCP URL 都应按敏感凭据处理。
+`.env`、`.mcp.json`、`.venv/`、`data/`、`reports/`、Streamlit 密钥文件和 IDE 配置均已被 `.gitignore` 忽略。API Key、访问 Token、Webhook URL 和托管 MCP URL 都应按敏感凭据处理。
+
+本机默认监听 `127.0.0.1`。部署到局域网、容器或云服务器前，必须配置 `INSIGHTPILOT_API_TOKEN`，并在反向代理层启用 HTTPS；该单 Token 方案适合个人部署，生产多用户环境仍需账号体系、权限控制和审计日志。
 
 公开推送前可执行：
 

@@ -5,6 +5,7 @@ import importlib.util
 from dataclasses import replace
 
 import pytest
+from fastapi import HTTPException
 
 from insightpilot.database import Database, utcnow
 from insightpilot.academic_research import ArxivMcpSearch, is_academic_goal, normalize_arxiv_response
@@ -14,6 +15,7 @@ from insightpilot.report_export import markdown_to_docx, markdown_to_pdf
 from insightpilot.runtime import ProductRuntime
 from insightpilot.network_security import UnsafeURL, assert_public_url
 from insightpilot.mcp_client import McpConnection, McpDependencyMissing, McpManager, _safe_error
+from insightpilot.api_auth import validate_api_access
 from insightpilot.settings import settings
 
 
@@ -31,6 +33,27 @@ def test_task_and_events_are_persistent(database):
     assert database.task(task_id)["status"] == "running"
     events = database.fetchall("SELECT * FROM events WHERE task_id=? ORDER BY id", (task_id,))
     assert [event["event_type"] for event in events] == ["task.queued", "agent.started"]
+
+
+def test_api_token_authentication():
+    validate_api_access("secret-token", "Bearer secret-token", "203.0.113.10")
+
+    with pytest.raises(HTTPException) as missing:
+        validate_api_access("secret-token", None, "127.0.0.1")
+    assert missing.value.status_code == 401
+
+    with pytest.raises(HTTPException) as incorrect:
+        validate_api_access("secret-token", "Bearer wrong-token", "127.0.0.1")
+    assert incorrect.value.status_code == 401
+
+
+def test_api_without_token_is_loopback_only():
+    validate_api_access("", None, "127.0.0.1")
+    validate_api_access("", None, "::1")
+
+    with pytest.raises(HTTPException) as remote:
+        validate_api_access("", None, "203.0.113.10")
+    assert remote.value.status_code == 403
 
 
 @pytest.mark.asyncio
