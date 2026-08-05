@@ -11,8 +11,9 @@ InsightPilot 将自然语言调研问题编排为一条可追溯的工作流：�
 - **实时网络调研**：通过 Tavily 搜索、并发抓取网页正文，并进行来源去重。
 - **学术论文调研**：可选接入远程 Streamable HTTP MCP，自动路由到 arXiv 论文检索。
 - **证据优先**：将来源 URL、检索时间、证据原文、主张和主张-证据关系持久化到 SQLite。
-- **多智能体流水线**：Search Planner、Web/Academic Researcher、Document Analyst、Evidence Verifier、Critic、Report Writer、Monitor Agent。
-- **长期运行**：SQLite WAL 任务队列、服务重启恢复、定时监控、SSE 事件流和飞书通知审批。
+- **Supervisor Multi-Agent**：Planner、Web/Academic Researcher、Evidence Analyst、Claim Verifier、Critic 和 Report Writer 拥有独立目标、私有上下文、工具权限与结构化交接协议。
+- **动态返工**：证据覆盖不足时自动重新规划与检索，Critic 可以要求补充来源或退回主张核验，并由轮次与质量门槛约束循环。
+- **长期运行**：SQLite WAL 任务队列、节点级 checkpoint、Agent 隔离重试、服务重启恢复、定时监控、SSE 事件流和飞书通知审批。
 - **安全与稳定性**：提示注入隔离、SSRF 防护、Provider 重试、JSON 结构化输出重试、报告降级和 MCP 敏感地址脱敏。
 - **可视化产品界面**：FastAPI 后端、Streamlit 前端、证据图谱和 Markdown/Word/PDF 报告导出。
 
@@ -21,20 +22,22 @@ InsightPilot 将自然语言调研问题编排为一条可追溯的工作流：�
 ```mermaid
 flowchart TD
     U["用户输入调研目标"] --> API["FastAPI：创建任务"]
-    API --> DB["SQLite：任务、事件、来源、证据、主张"]
-    API --> W["后台 Worker / Supervisor"]
+    API --> DB["SQLite Blackboard：状态、产物、私有消息、Checkpoint"]
+    API --> W["后台 Worker"]
+    W --> SP["Supervisor：动态路由、预算与失败恢复"]
 
-    W --> P["Search Planner：拆解查询词"]
-    P --> S["Web Researcher：Tavily 实时检索"]
-    P --> A["Academic Researcher：arXiv MCP（学术任务）"]
-
-    S --> F["网页抓取与清洗"]
-    A --> F
-    F --> D["Document Analyst：提取、去重、持久化证据"]
-
-    D --> V["Evidence Verifier：建立主张-证据关联"]
-    V --> C["Critic：识别偏差、风险与未知项"]
-    C --> R["Report Writer：生成引用报告"]
+    SP --> P["Planner Agent：研究维度与查询计划"]
+    P --> S["Web Researcher：仅允许 Tavily"]
+    P --> A["Academic Researcher：仅允许 arXiv MCP"]
+    S --> D["Evidence Analyst：抓取、清洗、证据持久化"]
+    A --> D
+    D --> V["Claim Verifier：精确引文与语义关系"]
+    V --> Q{"覆盖与冲突门槛"}
+    Q -- "证据不足" --> P
+    Q -- "达到门槛" --> C["Critic Agent：独立审查"]
+    C -- "补检索" --> P
+    C -- "修订主张" --> V
+    C -- "通过或达到预算" --> R["Report Writer：只读已核验主张"]
     R --> X["Markdown / Word / PDF"]
 
     DB --> UI["Streamlit 前端"]
@@ -49,14 +52,15 @@ flowchart TD
 
 ## 调研流程
 
-1. **Supervisor** 创建并持久化任务，识别是否属于学术调研。
-2. **Search Planner** 将目标拆解为相互补充的高质量查询词。
-3. **Web Researcher** 调用 Tavily；学术任务还可通过远程 MCP 调用 arXiv。
-4. **Document Analyst** 抓取页面、提取可引用证据、去重并保留来源信息。
-5. **Evidence Verifier** 只生成能够关联到真实 `evidence_id` 的主张。
-6. **Critic** 审查证据缺口、来源偏差、时效性和结论边界。
-7. **Report Writer** 生成带引用的 Markdown 报告，并导出 DOCX/PDF。
-8. **Monitor Agent** 定期重新调研，检测变化；对外通知必须先经人工审批。
+1. **Supervisor** 从共享 Blackboard 读取结构化交接，根据质量、错误和预算动态选择下一 Agent。
+2. **Planner** 结合上一轮缺口、冲突和私有执行历史，生成不重复的查询计划。
+3. **Web/Academic Researcher** 在代码级工具白名单内独立检索，不能核验主张或撰写报告。
+4. **Evidence Analyst** 抓取页面、隔离提示注入、提取原文并持久化证据。
+5. **Claim Verifier** 要求 `supporting_quote` 能在原文中精确匹配，并保存 `entailed/contradicted/partial/irrelevant` 语义关系。
+6. 覆盖率、独立来源和冲突门槛不通过时，**Supervisor** 自动将任务返回 Planner 补检索。
+7. **Critic** 可选择 `accept/search_more/revise_claims/partial`，从而改变后续执行路径。
+8. 每个节点独立重试并写入 checkpoint；Provider 失败时切换研究 Agent、复用已保存证据或生成明确标注的部分报告。
+9. **Report Writer** 无检索权限，只能读取已核验主张；报告还会经过引用完整性校验。
 
 ## 快速开始（Windows）
 
@@ -92,6 +96,17 @@ INSIGHTPILOT_API_TOKEN=
 
 # 推理模型的该预算包含内部推理 Token。
 INSIGHTPILOT_REPORT_MAX_TOKENS=8192
+INSIGHTPILOT_JSON_MAX_TOKENS=4096
+INSIGHTPILOT_JSON_RETRY_MAX_TOKENS=8192
+INSIGHTPILOT_AGENT_RETRIES=2
+INSIGHTPILOT_VERIFIER_BATCH_SIZE=3
+INSIGHTPILOT_MAX_VERIFICATION_EVIDENCE=24
+INSIGHTPILOT_MAX_AGENT_STEPS=30
+INSIGHTPILOT_MAX_SEARCH_ROUNDS=3
+INSIGHTPILOT_MAX_REVISION_ROUNDS=2
+INSIGHTPILOT_MIN_EVIDENCE_COVERAGE=0.72
+INSIGHTPILOT_MIN_VERIFIED_CLAIMS=3
+INSIGHTPILOT_MIN_UNIQUE_SOURCES=3
 
 # 可选：arXiv 远程 MCP 地址
 MODELSCOPE_ARXIV_MCP_URL=
@@ -138,7 +153,9 @@ http://127.0.0.1:8000/api/v1/mcp/tools
 
 部分推理模型会在输出可见正文前消耗 Token 进行内部推理。InsightPilot 为报告单独设置了输出上限，默认使用 `INSIGHTPILOT_REPORT_MAX_TOKENS=8192`；当流式请求为空时，会自动降级为普通请求重试。
 
-若 Provider 仍连续返回空正文，系统才会基于已核验主张、证据 ID 和真实来源生成“证据模板报告”。任务事件会明确记录报告生成方式为 `llm` 或 `evidence_fallback`，不会把降级结果冒充为模型正常生成结果。
+结构化输出首次使用 Provider 的 JSON 模式；出现空响应或格式错误后，会关闭强制 JSON 模式并逐步提高输出预算。Claim Verifier 按来源质量和来源多样性选择证据，默认每批 3 条；单批失败时只拆分该批继续核验，不会丢弃其他成功批次。任务恢复会优先返回最近失败的 Agent。
+
+若 Provider 仍连续返回空正文，系统才会基于已核验主张、证据 ID 和真实来源生成“证据模板报告”。若已有候选证据但尚无已核验主张，系统会生成 `unverified_evidence` 部分报告，明确区分“已检索但未核验”和“没有检索结果”。任务事件会记录实际生成方式，不会把降级结果冒充为模型正常生成结果。
 
 ## 主要 API
 
@@ -147,6 +164,8 @@ http://127.0.0.1:8000/api/v1/mcp/tools
 | `POST` | `/api/v1/tasks` | 创建调研任务 |
 | `GET` | `/api/v1/tasks/{id}` | 获取任务状态和结果 |
 | `GET` | `/api/v1/tasks/{id}/events/stream` | 订阅 SSE 实时事件 |
+| `GET` | `/api/v1/tasks/{id}/agent-trace` | 查看 Agent 权限、独立执行、结构化交接、路由和 checkpoint |
+| `POST` | `/api/v1/tasks/{id}/retry` | 从最近失败 Agent 或持久化检查点恢复 |
 | `GET` | `/api/v1/tasks/{id}/evidence-graph` | 获取主张、证据及关联图谱 |
 | `POST` | `/api/v1/monitors` | 创建定时监控任务 |
 | `GET` | `/api/v1/approvals` | 查看待审批的外部操作 |
@@ -162,7 +181,7 @@ cd InsightPilot
 .\.venv\Scripts\python.exe -m compileall -q python
 ```
 
-测试覆盖任务持久化、证据图谱关联、SSRF 防护、通知审批、Streamable HTTP MCP 发现与调用、论文结果规范化、结构化输出重试和报告降级。
+测试覆盖工具权限隔离、Agent 私有上下文、共享 checkpoint、Verifier 驳回后的动态补检索、失败批次拆分、精确引文校验、失败节点恢复、来源质量排序、任务持久化、证据图谱关联、SSRF 防护、通知审批、Streamable HTTP MCP 发现与调用、结构化输出自适应重试和报告降级。
 
 ## 项目结构
 
@@ -171,11 +190,13 @@ frontend/                 Streamlit 产品界面
 python/insightpilot/
   api.py                  FastAPI 与 SSE 接口
   runtime.py              Worker、调度器、监控与通知审批
-  research_pipeline.py    多智能体调研编排
+  multi_agent.py          Agent 协议、共享状态、工具权限与执行日志
+  research_agents.py      独立研究 Agent 与 Supervisor 动态路由
+  research_pipeline.py    显式状态机、领域工具和失败恢复
   providers.py            LLM/Tavily Provider 与重试处理
   academic_research.py    arXiv MCP 路由与论文结果规范化
   mcp_client.py           stdio 与 Streamable HTTP MCP 客户端
-  database.py             任务、来源、证据、主张的 SQLite 持久化
+  database.py             Blackboard、Checkpoint、Agent Trace 与证据持久化
   network_security.py     外部请求安全防护
 .insightpilot/            可复用 Agent 定义与调研 Skills
 scripts/                  Windows 环境配置与启动脚本
@@ -188,6 +209,7 @@ tests/                    产品与 MCP 集成测试
 - arXiv MCP 是可选论文检索来源，不能代替新闻、公司、政策和产品信息检索。
 - 网页内容属于不可信外部数据，可能不完整、有偏差、过时或错误。
 - SQLite 适用于本地单机；生产多实例部署应替换为 PostgreSQL 与 Redis/Celery，并增加身份认证和权限控制。
+- 当前采用中心化 Supervisor/Blackboard Multi-Agent 架构，不是去中心化群体智能；Supervisor 对循环、预算和最终路由拥有控制权。
 - 大模型输出可能错误。用于重要决策前，必须依据关联证据和原始来源人工复核。
 
 ## 安全与仓库卫生

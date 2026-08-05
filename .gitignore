@@ -16,6 +16,7 @@ reports/
 playwright-report/
 *.log
 .DS_Store
+~$*.docx
 
 # Local interview handbook and its render/QA artifacts
 docs/InsightPilot项目面试复习手册.docx

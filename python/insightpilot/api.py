@@ -89,6 +89,7 @@ async def health():
             "mcp": runtime.mcp.status(),
         },
         "truthfulness": "未配置的外部服务会明确报错，不会返回伪实时结果",
+        "architecture": "supervisor-blackboard-multi-agent",
     }
 
 
@@ -105,7 +106,7 @@ async def mcp_tools():
 @app.get("/api/v1/metrics")
 async def metrics():
     task_counts = db.fetchall("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status")
-    totals = db.fetchone("SELECT (SELECT COUNT(*) FROM sources) AS sources, (SELECT COUNT(*) FROM evidence) AS evidence, (SELECT COUNT(*) FROM claims) AS claims, (SELECT COUNT(*) FROM monitors WHERE enabled=1) AS active_monitors, (SELECT COUNT(*) FROM approvals WHERE status='pending') AS pending_approvals")
+    totals = db.fetchone("SELECT (SELECT COUNT(*) FROM sources) AS sources, (SELECT COUNT(*) FROM evidence) AS evidence, (SELECT COUNT(*) FROM claims) AS claims, (SELECT COUNT(*) FROM agent_runs) AS agent_runs, (SELECT COUNT(*) FROM workflow_checkpoints) AS checkpoints, (SELECT COUNT(*) FROM monitors WHERE enabled=1) AS active_monitors, (SELECT COUNT(*) FROM approvals WHERE status='pending') AS pending_approvals")
     return {"tasks": {row["status"]: row["count"] for row in task_counts}, "totals": totals, "queue_depth": runtime.queue.qsize(), "workers": len(runtime.worker_tasks)}
 
 
@@ -158,6 +159,13 @@ async def task_events(task_id: str, after_id: int = Query(default=0, ge=0)):
     if not db.task(task_id):
         raise HTTPException(404, "task not found")
     return db.fetchall("SELECT * FROM events WHERE task_id=? AND id>? ORDER BY id", (task_id, after_id))
+
+
+@app.get("/api/v1/tasks/{task_id}/agent-trace")
+async def task_agent_trace(task_id: str):
+    if not db.task(task_id):
+        raise HTTPException(404, "task not found")
+    return db.agent_trace(task_id)
 
 
 @app.get("/api/v1/tasks/{task_id}/events/stream")

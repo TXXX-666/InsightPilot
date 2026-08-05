@@ -2,15 +2,31 @@ from __future__ import annotations
 
 import hmac
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_ROOT / ".env")
 API = os.getenv("INSIGHTPILOT_API_URL", "http://127.0.0.1:8000")
 EXPECTED_API_TOKEN = os.getenv("INSIGHTPILOT_API_TOKEN", "").strip()
+
+
+def display_time(value: str | None) -> str:
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return value
 
 
 def api(method: str, path: str, **kwargs):
@@ -41,11 +57,12 @@ if EXPECTED_API_TOKEN and not st.session_state.get("insightpilot_authenticated")
     with st.form("insightpilot-login"):
         supplied_token = st.text_input("访问令牌", type="password")
         if st.form_submit_button("登录", type="primary"):
-            if supplied_token and hmac.compare_digest(
-                supplied_token, EXPECTED_API_TOKEN
+            normalized_token = supplied_token.strip()
+            if normalized_token and hmac.compare_digest(
+                normalized_token, EXPECTED_API_TOKEN
             ):
                 st.session_state["insightpilot_authenticated"] = True
-                st.session_state["insightpilot_api_token"] = supplied_token
+                st.session_state["insightpilot_api_token"] = normalized_token
                 st.rerun()
             else:
                 st.error("访问令牌不正确")
@@ -94,7 +111,7 @@ with research_tab:
 
     tasks = api("GET", "/api/v1/tasks?limit=30") or []
     if tasks:
-        options = {f"{t['created_at'][:19]} · {t['status']} · {t['goal'][:60]}": t["id"] for t in tasks}
+        options = {f"{display_time(t['created_at'])} · {t['status']} · {t['goal'][:60]}": t["id"] for t in tasks}
         labels = list(options)
         current_id = st.session_state.get("task_id")
         default_index = next((i for i, label in enumerate(labels) if options[label] == current_id), 0)
@@ -105,15 +122,21 @@ with research_tab:
         def live_task(task_id: str):
             task = api("GET", f"/api/v1/tasks/{task_id}")
             events = api("GET", f"/api/v1/tasks/{task_id}/events") or []
+            trace = api("GET", f"/api/v1/tasks/{task_id}/agent-trace") or {}
             if not task:
                 return
             c1, c2, c3 = st.columns(3)
             c1.metric("状态", task["status"])
             c2.metric("事件数", len(events))
-            c3.metric("更新时间", task["updated_at"][:19])
+            c3.metric("更新时间", display_time(task["updated_at"]))
             if task.get("error"):
                 st.error(task["error"])
-                if task["status"] == "failed" and st.button("从断点重试", key=f"retry-{task_id}", type="primary"):
+            failed_runs = [run for run in trace.get("runs", []) if run.get("status") == "failed"]
+            if task["status"] == "partial" and failed_runs:
+                latest_failure = failed_runs[-1]
+                st.error(f"最近失败节点：{latest_failure['agent']} · {latest_failure.get('error') or '未记录错误'}")
+            if task["status"] in {"failed", "partial", "cancelled"}:
+                if st.button("从失败节点恢复", key=f"retry-{task_id}", type="primary"):
                     retried = api("POST", f"/api/v1/tasks/{task_id}/retry")
                     if retried:
                         st.rerun()
@@ -122,19 +145,48 @@ with research_tab:
                     api("POST", f"/api/v1/tasks/{task_id}/cancel")
             if events:
                 st.subheader("实时 Agent 事件")
-                frame = pd.DataFrame([{"时间": e["created_at"][:19], "Agent": e["agent"], "事件": e["event_type"], "说明": e["message"]} for e in events[::-1]])
-                st.dataframe(frame, use_container_width=True, hide_index=True)
-            if task["status"] == "completed":
+                frame = pd.DataFrame([{"时间": display_time(e["created_at"]), "Agent": e["agent"], "事件": e["event_type"], "说明": e["message"]} for e in events[::-1]])
+                st.dataframe(frame, width="stretch", hide_index=True)
+            if trace and trace.get("runs"):
+                st.subheader("Multi-Agent 执行轨迹")
+                trace_rows = []
+                for run in trace["runs"]:
+                    output = run.get("output") or {}
+                    trace_rows.append({
+                        "Agent": run["agent"],
+                        "状态": run["status"],
+                        "轮次": run["round"],
+                        "允许工具": "、".join(run.get("allowed_tools", [])) or "无",
+                        "建议动作": output.get("proposed_action") or output.get("next_agent", ""),
+                        "原因": output.get("reason", ""),
+                    })
+                st.dataframe(pd.DataFrame(trace_rows), width="stretch", hide_index=True)
+                checkpoint = trace.get("checkpoint") or {}
+                state = checkpoint.get("state") or {}
+                if state:
+                    q1, q2, q3, q4 = st.columns(4)
+                    q1.metric("检索轮次", state.get("search_round", 0))
+                    q2.metric("证据覆盖", f"{float(state.get('coverage_score', 0)):.2f}")
+                    q3.metric("引用覆盖", f"{float(state.get('citation_score', 0)):.2f}")
+                    q4.metric("下一 Agent", checkpoint.get("current_agent", "-"))
+            if task["status"] in {"completed", "partial"}:
                 result = task.get("result") or {}
                 st.subheader("研究报告")
+                if task["status"] == "partial":
+                    st.warning("任务达到质量、循环或 Provider 边界，以下为明确标注的部分报告。")
                 st.markdown(result.get("report", ""))
                 st.download_button("下载 Markdown 报告", result.get("report", ""), file_name=f"insightpilot-{task_id}.md")
                 st.caption("Word/PDF 报告可通过 API 下载：/api/v1/tasks/{task_id}/report?format=docx|pdf")
                 graph = api("GET", f"/api/v1/tasks/{task_id}/evidence-graph")
                 if graph:
                     st.subheader("证据追溯")
-                    st.write(f"主张 {len(graph['claims'])} 个，证据 {len(graph['evidence'])} 条，关联 {len(graph['links'])} 条")
-                    st.dataframe(pd.DataFrame(graph["claims"]), use_container_width=True, hide_index=True)
+                    verified = sum(1 for claim in graph["claims"] if claim.get("status") == "verified")
+                    mixed = sum(1 for claim in graph["claims"] if claim.get("status") == "mixed")
+                    st.write(
+                        f"主张 {len(graph['claims'])} 个（verified {verified}，mixed {mixed}），"
+                        f"证据 {len(graph['evidence'])} 条，关联 {len(graph['links'])} 条"
+                    )
+                    st.dataframe(pd.DataFrame(graph["claims"]), width="stretch", hide_index=True)
 
         live_task(st.session_state["task_id"])
 
@@ -151,7 +203,7 @@ with monitor_tab:
                 st.success(f"监控已创建：{created['monitor_id']}")
     monitors = api("GET", "/api/v1/monitors") or []
     if monitors:
-        st.dataframe(pd.DataFrame(monitors), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(monitors), width="stretch", hide_index=True)
 
 with approval_tab:
     approvals = api("GET", "/api/v1/approvals?status=pending") or []
@@ -160,7 +212,7 @@ with approval_tab:
     for item in approvals:
         with st.container(border=True):
             st.write(item["summary"])
-            st.caption(f"类型：{item['action_type']} · 请求时间：{item['requested_at']}")
+            st.caption(f"类型：{item['action_type']} · 请求时间：{display_time(item['requested_at'])}")
             left, right = st.columns(2)
             if left.button("批准并执行", key=f"approve-{item['id']}", type="primary"):
                 api("POST", f"/api/v1/approvals/{item['id']}/decision", json={"approve": True})
