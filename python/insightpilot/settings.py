@@ -18,6 +18,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path = PROJECT_ROOT
@@ -37,7 +44,18 @@ class Settings:
     fetch_concurrency: int = _int("INSIGHTPILOT_FETCH_CONCURRENCY", 5)
     provider_retries: int = _int("INSIGHTPILOT_PROVIDER_RETRIES", 3)
     json_retries: int = _int("INSIGHTPILOT_JSON_RETRIES", 2)
+    json_max_tokens: int = _int("INSIGHTPILOT_JSON_MAX_TOKENS", 4096)
+    json_retry_max_tokens: int = _int("INSIGHTPILOT_JSON_RETRY_MAX_TOKENS", 8192)
     report_max_tokens: int = _int("INSIGHTPILOT_REPORT_MAX_TOKENS", 8192)
+    agent_retries: int = _int("INSIGHTPILOT_AGENT_RETRIES", 2)
+    verifier_batch_size: int = _int("INSIGHTPILOT_VERIFIER_BATCH_SIZE", 3)
+    max_verification_evidence: int = _int("INSIGHTPILOT_MAX_VERIFICATION_EVIDENCE", 24)
+    max_agent_steps: int = _int("INSIGHTPILOT_MAX_AGENT_STEPS", 30)
+    max_search_rounds: int = _int("INSIGHTPILOT_MAX_SEARCH_ROUNDS", 3)
+    max_revision_rounds: int = _int("INSIGHTPILOT_MAX_REVISION_ROUNDS", 2)
+    min_evidence_coverage: float = _float("INSIGHTPILOT_MIN_EVIDENCE_COVERAGE", 0.72)
+    min_verified_claims: int = _int("INSIGHTPILOT_MIN_VERIFIED_CLAIMS", 3)
+    min_unique_sources: int = _int("INSIGHTPILOT_MIN_UNIQUE_SOURCES", 3)
 
     def ensure_dirs(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,7 +10,13 @@ from fastapi import HTTPException
 from insightpilot.database import Database, utcnow
 from insightpilot.academic_research import ArxivMcpSearch, is_academic_goal, normalize_arxiv_response
 from insightpilot.providers import LLMGateway, ProviderUnavailable
-from insightpilot.research_pipeline import ResearchPipeline, evidence_graph, sha256
+from insightpilot.research_pipeline import (
+    ResearchPipeline,
+    evidence_graph,
+    reliability_for,
+    sha256,
+    source_type,
+)
 from insightpilot.report_export import markdown_to_docx, markdown_to_pdf
 from insightpilot.runtime import ProductRuntime
 from insightpilot.network_security import UnsafeURL, assert_public_url
@@ -93,6 +99,31 @@ async def test_llm_json_reports_actionable_error_after_exhausted_retries():
 
 
 @pytest.mark.asyncio
+async def test_llm_json_relaxes_mode_and_increases_budget_after_empty_response():
+    config = replace(
+        settings,
+        llm_api_key="test",
+        llm_model="test",
+        json_retries=1,
+        json_max_tokens=1000,
+        json_retry_max_tokens=4000,
+    )
+    gateway = LLMGateway(config)
+    calls = []
+
+    async def fake_complete(*args, **kwargs):
+        calls.append(kwargs)
+        return "" if len(calls) == 1 else '{"ok": true}'
+
+    gateway.complete = fake_complete
+    assert await gateway.json("system", "user") == {"ok": True}
+    assert calls == [
+        {"json_mode": True, "max_tokens": 1000},
+        {"json_mode": False, "max_tokens": 2000},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_report_writer_falls_back_when_stream_is_empty(database, tmp_path):
     config = replace(settings, db_path=tmp_path / "test.db", report_dir=tmp_path / "reports")
     pipeline = ResearchPipeline(database, config)
@@ -136,6 +167,79 @@ async def test_report_writer_creates_evidence_fallback_after_two_empty_responses
     assert "https://example.com" in report
     event = database.fetchone("SELECT payload_json FROM events WHERE task_id=? AND agent='report-writer' AND event_type='agent.completed'", (task_id,))
     assert json.loads(event["payload_json"])["generation"] == "evidence_fallback"
+
+
+@pytest.mark.asyncio
+async def test_report_without_verified_claims_lists_retrieved_evidence_accurately(database, tmp_path):
+    config = replace(settings, db_path=tmp_path / "test.db", report_dir=tmp_path / "reports")
+    pipeline = ResearchPipeline(database, config)
+
+    async def unexpected_completion(*args, **kwargs):
+        raise AssertionError("LLM should not write conclusions without verified claims")
+
+    pipeline.llm.complete = unexpected_completion
+    task_id = database.create_task("inspect a market")
+    report = await pipeline._write_report(
+        task_id,
+        "inspect a market",
+        [],
+        [{
+            "evidence_id": "evidence-1",
+            "source_id": "source-1",
+            "title": "Candidate source",
+            "url": "https://example.com/source",
+            "retrieved_at": "2026-08-05T00:00:00+00:00",
+            "fetch_status": "fetched",
+        }],
+        {"gaps": ["verification failed"], "risks": []},
+        partial=True,
+    )
+    assert "已提取 1 条候选证据" in report
+    assert "https://example.com/source" in report
+    assert "不是检索结果为零" in report
+
+
+def test_source_quality_distinguishes_primary_and_weak_sources():
+    official = "https://example.gov.cn/jobs/llm"
+    community = "https://blog.csdn.net/example/article/details/1"
+    assert source_type(official) == "official"
+    assert source_type(community) == "community"
+    assert reliability_for(official, 0.8, "fetched") > reliability_for(
+        community, 0.8, "fetched"
+    )
+    assert reliability_for(official, 0.8, "fetched") > reliability_for(
+        official, 0.8, "search_snippet"
+    )
+
+
+def test_source_quality_gate_downgrades_community_only_claim(database, tmp_path):
+    pipeline = ResearchPipeline(
+        database,
+        replace(settings, db_path=tmp_path / "test.db", report_dir=tmp_path / "reports"),
+    )
+    task_id = database.create_task("quality gate")
+    database.insert("sources", {
+        "id": "s1", "task_id": task_id,
+        "url": "https://blog.csdn.net/example/article/details/1", "title": "Community",
+        "published_at": None, "retrieved_at": utcnow(), "source_type": "community",
+        "fetch_status": "fetched", "content_hash": sha256("source"), "raw_text": "text",
+    })
+    database.insert("evidence", {
+        "id": "e1", "task_id": task_id, "source_id": "s1", "claim": None,
+        "quote": "A sufficiently long community quotation for the quality gate.",
+        "reliability": 0.8, "stance": "supports", "content_hash": sha256("evidence"),
+        "created_at": utcnow(),
+    })
+    database.insert("claims", {
+        "id": "c1", "task_id": task_id, "text": "Community-only claim",
+        "confidence": 0.9, "status": "verified", "created_at": utcnow(),
+    })
+    database.insert("claim_evidence", {
+        "claim_id": "c1", "evidence_id": "e1", "relation": "supports",
+    })
+    claims = pipeline._apply_source_quality_gate(task_id, pipeline._load_claims(task_id))
+    assert claims[0]["status"] == "mixed"
+    assert database.fetchone("SELECT status FROM claims WHERE id='c1'")["status"] == "mixed"
 
 
 def test_evidence_graph_keeps_real_links(database):

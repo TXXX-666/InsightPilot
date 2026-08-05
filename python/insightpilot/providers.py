@@ -81,6 +81,7 @@ class LLMGateway:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = AsyncOpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key or "not-configured")
+        self.last_response_metadata: dict[str, Any] = {}
 
     @property
     def configured(self) -> bool:
@@ -89,6 +90,13 @@ class LLMGateway:
     async def complete(self, system: str, user: str, *, temperature: float = 0.1, json_mode: bool = False, max_tokens: int = 4096, stream: bool = False) -> str:
         if not self.configured:
             raise ProviderUnavailable("LLM_API_KEY 未配置，不能执行智能体规划、核验和报告生成")
+        self.last_response_metadata = {
+            "model": self.settings.llm_model,
+            "finish_reason": None,
+            "stream": stream,
+            "requested_max_tokens": max_tokens,
+            "json_mode": json_mode,
+        }
         kwargs: dict[str, Any] = {
             "model": self.settings.llm_model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -102,11 +110,34 @@ class LLMGateway:
         async def call():
             response = await self.client.chat.completions.create(**kwargs)
             if not stream:
-                return response.choices[0].message.content or ""
+                choice = response.choices[0]
+                usage = getattr(response, "usage", None)
+                self.last_response_metadata = {
+                    "model": getattr(response, "model", self.settings.llm_model),
+                    "finish_reason": choice.finish_reason,
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                    "completion_tokens": getattr(usage, "completion_tokens", None),
+                    "total_tokens": getattr(usage, "total_tokens", None),
+                    "stream": False,
+                    "requested_max_tokens": max_tokens,
+                    "json_mode": json_mode,
+                }
+                return choice.message.content or ""
             chunks: list[str] = []
+            finish_reason = None
             async for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    chunks.append(chunk.choices[0].delta.content)
+                if chunk.choices:
+                    choice = chunk.choices[0]
+                    if choice.delta.content:
+                        chunks.append(choice.delta.content)
+                    finish_reason = choice.finish_reason or finish_reason
+            self.last_response_metadata = {
+                "model": self.settings.llm_model,
+                "finish_reason": finish_reason,
+                "stream": True,
+                "requested_max_tokens": max_tokens,
+                "json_mode": json_mode,
+            }
             return "".join(chunks)
         response = await _retry(call, self.settings.provider_retries)
         return response
@@ -125,16 +156,25 @@ class LLMGateway:
                 return json.loads(raw[start : end + 1])
             raise exc
 
-    async def json(self, system: str, user: str) -> dict[str, Any]:
-        """Generate structured output with a small retry budget for JSON-mode quirks."""
+    async def json(
+        self,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Generate JSON, then relax JSON mode and increase budget when needed."""
         last_error: Exception | None = None
         retry_instruction = ""
+        base_tokens = max(512, max_tokens or self.settings.json_max_tokens)
+        retry_ceiling = max(base_tokens, self.settings.json_retry_max_tokens)
         for attempt in range(self.settings.json_retries + 1):
+            token_budget = min(base_tokens * (2**attempt), retry_ceiling)
             raw = await self.complete(
                 system,
                 user + retry_instruction,
-                json_mode=True,
-                max_tokens=2500,
+                json_mode=attempt == 0,
+                max_tokens=token_budget,
             )
             try:
                 parsed = self._parse_json(raw)
@@ -150,9 +190,11 @@ class LLMGateway:
                     )
 
         detail = "空响应" if isinstance(last_error, ValueError) and str(last_error) == "empty response" else "格式错误"
+        finish_reason = self.last_response_metadata.get("finish_reason")
+        diagnostic = f" finish_reason={finish_reason}" if finish_reason else ""
         raise ProviderUnavailable(
             f"大模型未返回有效 JSON（{detail}），已重试 {self.settings.json_retries} 次。"
-            "请检查模型是否支持 JSON 模式，或稍后从断点重试。"
+            f"请检查模型是否支持 JSON 模式，或稍后从断点重试。{diagnostic}"
         ) from last_error
 
     async def health(self) -> dict[str, Any]:
