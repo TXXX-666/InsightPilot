@@ -44,6 +44,14 @@ def api(method: str, path: str, **kwargs):
         )
         response.raise_for_status()
         return response.json()
+    except httpx.HTTPStatusError as exc:
+        try:
+            payload = exc.response.json()
+            detail = payload.get("detail", payload)
+        except ValueError:
+            detail = exc.response.text or str(exc)
+        st.error(f"API 请求失败（{exc.response.status_code}）：{detail}")
+        return None
     except Exception as exc:
         st.error(f"API 请求失败：{exc}")
         return None
@@ -205,10 +213,26 @@ with monitor_tab:
         interval = st.number_input("执行间隔（分钟）", min_value=1, value=1440)
         notify = st.selectbox("变化通知", ["不通知", "飞书（需审批）"])
         if st.form_submit_button("创建监控"):
-            channel = "feishu" if notify.startswith("飞书") else None
-            created = api("POST", "/api/v1/monitors", json={"name": name, "query": query, "interval_minutes": interval, "notify_channel": channel})
-            if created:
-                st.success(f"监控已创建：{created['monitor_id']}")
+            clean_name = name.strip()
+            clean_query = query.strip()
+            if len(clean_name) < 2:
+                st.error("请填写至少 2 个字符的监控名称。")
+            elif len(clean_query) < 5:
+                st.error("请填写至少 5 个字符的监控目标。")
+            else:
+                channel = "feishu" if notify.startswith("飞书") else None
+                created = api(
+                    "POST",
+                    "/api/v1/monitors",
+                    json={
+                        "name": clean_name,
+                        "query": clean_query,
+                        "interval_minutes": int(interval),
+                        "notify_channel": channel,
+                    },
+                )
+                if created:
+                    st.success(f"监控已创建：{created['monitor_id']}")
     monitors = api("GET", "/api/v1/monitors") or []
     if monitors:
         st.dataframe(pd.DataFrame(monitors), width="stretch", hide_index=True)
