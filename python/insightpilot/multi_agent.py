@@ -112,6 +112,10 @@ class ResearchState:
     current_agent: str = "supervisor"
     next_agent: str = "planner"
     research_plan: dict[str, Any] = field(default_factory=dict)
+    required_dimensions: list[str] = field(default_factory=list)
+    optional_dimensions: list[str] = field(default_factory=list)
+    covered_dimensions: list[str] = field(default_factory=list)
+    blocking_dimensions: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     previous_queries: list[str] = field(default_factory=list)
     search_round: int = 0
@@ -132,6 +136,11 @@ class ResearchState:
     last_result: dict[str, Any] = field(default_factory=dict)
     report: str = ""
     partial: bool = False
+    partial_reason: str | None = None
+    limitations: list[str] = field(default_factory=list)
+    quality_snapshot: dict[str, float | int] = field(default_factory=dict)
+    stagnant_rounds: int = 0
+    stagnant_core_rounds: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

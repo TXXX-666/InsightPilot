@@ -173,7 +173,15 @@ with research_tab:
                 result = task.get("result") or {}
                 st.subheader("研究报告")
                 if task["status"] == "partial":
-                    st.warning("任务达到质量、循环或 Provider 边界，以下为明确标注的部分报告。")
+                    reason = result.get("partial_reason") or "任务达到质量、循环或 Provider 边界"
+                    st.warning(f"部分报告原因：{reason}")
+                elif result.get("completion_type") == "completed_with_limitations":
+                    st.info("研究质量门槛已通过，报告已完成；以下局限不阻断核心结论。")
+                limitations = result.get("limitations") or []
+                if limitations:
+                    with st.expander("研究局限", expanded=task["status"] == "partial"):
+                        for item in limitations:
+                            st.markdown(f"- {item}")
                 st.markdown(result.get("report", ""))
                 st.download_button("下载 Markdown 报告", result.get("report", ""), file_name=f"insightpilot-{task_id}.md")
                 st.caption("Word/PDF 报告可通过 API 下载：/api/v1/tasks/{task_id}/report?format=docx|pdf")

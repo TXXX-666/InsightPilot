@@ -49,7 +49,10 @@ class Settings:
     report_max_tokens: int = _int("INSIGHTPILOT_REPORT_MAX_TOKENS", 8192)
     agent_retries: int = _int("INSIGHTPILOT_AGENT_RETRIES", 2)
     verifier_batch_size: int = _int("INSIGHTPILOT_VERIFIER_BATCH_SIZE", 3)
-    max_verification_evidence: int = _int("INSIGHTPILOT_MAX_VERIFICATION_EVIDENCE", 24)
+    max_verification_evidence: int = _int("INSIGHTPILOT_MAX_VERIFICATION_EVIDENCE", 12)
+    followup_verification_evidence: int = _int(
+        "INSIGHTPILOT_FOLLOWUP_VERIFICATION_EVIDENCE", 6
+    )
     max_agent_steps: int = _int("INSIGHTPILOT_MAX_AGENT_STEPS", 30)
     max_search_rounds: int = _int("INSIGHTPILOT_MAX_SEARCH_ROUNDS", 3)
     max_revision_rounds: int = _int("INSIGHTPILOT_MAX_REVISION_ROUNDS", 2)

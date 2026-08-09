@@ -14,6 +14,27 @@ from .multi_agent import (
 from .settings import Settings
 
 
+def quality_gate_passed(state: ResearchState, settings: Settings) -> bool:
+    verified = [claim for claim in state.claims if claim.get("status") == "verified"]
+    evidence_sources = {
+        item.get("evidence_id"): item.get("source_id")
+        for item in state.evidence
+        if item.get("evidence_id") and item.get("source_id")
+    }
+    referenced_sources = {
+        evidence_sources.get(evidence_id)
+        for claim in verified
+        for evidence_id in claim.get("evidence_ids", [])
+        if evidence_sources.get(evidence_id)
+    }
+    return (
+        len(verified) >= settings.min_verified_claims
+        and len(referenced_sources) >= settings.min_unique_sources
+        and state.coverage_score >= settings.min_evidence_coverage
+        and state.citation_score >= 0.999
+    )
+
+
 class ResearchAgent(ABC):
     def __init__(self, spec: AgentSpec, tools: ToolRegistry, settings: Settings):
         self.spec = spec
@@ -227,9 +248,29 @@ class CriticAgent(ResearchAgent):
             evidence=state.evidence,
             academic=state.academic,
             coverage_score=state.coverage_score,
+            required_dimensions=state.required_dimensions,
+            optional_dimensions=state.optional_dimensions,
             private_history=context.history_summary(),
         )
         decision = str(critique.get("decision", "accept"))
+        blocking_gaps = [str(item) for item in critique.get("blocking_gaps", [])]
+        if (
+            decision in {"search_more", "partial"}
+            and quality_gate_passed(state, self.settings)
+            and not blocking_gaps
+        ):
+            decision = "accept"
+            critique["decision"] = decision
+            critique["advisory_gaps"] = list(
+                dict.fromkeys(
+                    [str(item) for item in critique.get("advisory_gaps", [])]
+                    + [str(item) for item in critique.get("gaps", [])]
+                )
+            )
+            critique["reason"] = (
+                str(critique.get("reason") or "")
+                + "；确定性质量门槛已通过，非阻断缺口作为报告局限保留"
+            ).strip("；")
         action = {
             "accept": "write_report",
             "search_more": "search_more",
@@ -246,7 +287,11 @@ class CriticAgent(ResearchAgent):
             missing_information=[str(item) for item in critique.get("gaps", [])],
             suggested_queries=[str(item) for item in critique.get("suggested_queries", [])],
             confidence=float(critique.get("overall_confidence", state.coverage_score) or 0),
-            metrics={"decision": decision, "risk_count": len(critique.get("risks", []))},
+            metrics={
+                "decision": decision,
+                "risk_count": len(critique.get("risks", [])),
+                "blocking_gap_count": len(blocking_gaps),
+            },
         )
 
 
@@ -264,6 +309,7 @@ class ReportWriterAgent(ResearchAgent):
             critique=state.critique,
             academic=state.academic,
             partial=state.partial,
+            limitations=state.limitations,
         )
         verified_count = sum(
             1 for claim in state.claims if claim.get("status", "verified") == "verified"
@@ -301,6 +347,33 @@ class SupervisorAgent:
     def __init__(self, settings: Settings):
         self.settings = settings
 
+    def _quality_gate_passed(self, state: ResearchState) -> bool:
+        return quality_gate_passed(state, self.settings)
+
+    @staticmethod
+    def _add_limitations(state: ResearchState, *items: str) -> None:
+        state.limitations = list(
+            dict.fromkeys(
+                state.limitations
+                + [str(item).strip() for item in items if str(item).strip()]
+            )
+        )
+
+    @classmethod
+    def _add_critique_limitations(cls, state: ResearchState) -> None:
+        cls._add_limitations(
+            state,
+            *state.critique.get("advisory_gaps", []),
+            *state.critique.get("gaps", []),
+            *state.critique.get("risks", []),
+        )
+
+    @classmethod
+    def _mark_partial(cls, state: ResearchState, reason: str) -> None:
+        state.partial = True
+        state.partial_reason = reason
+        cls._add_limitations(state, reason)
+
     def decide(
         self,
         state: ResearchState,
@@ -325,11 +398,18 @@ class SupervisorAgent:
             if agent == "evidence-analyst" and state.evidence:
                 return SupervisorDecision("claim-verifier", "正文分析失败，使用已持久化证据恢复")
             if agent == "claim-verifier":
-                state.partial = True
+                self._mark_partial(state, "Claim Verifier 重试后仍失败，无法确认主张与证据的语义关系")
                 return SupervisorDecision("report-writer", "核验 Agent 失败，生成明确标注局限的部分报告", partial=True)
             if agent == "critic":
-                state.partial = True
-                return SupervisorDecision("report-writer", "Critic 失败，保留风险提示并生成部分报告", partial=True)
+                reason = "Critic 重试后仍失败，未完成独立批判审查"
+                self._add_limitations(state, reason)
+                if self._quality_gate_passed(state) and not state.conflicts:
+                    return SupervisorDecision(
+                        "report-writer",
+                        "Critic 不可用，但确定性质量门槛已通过；带局限说明生成报告",
+                    )
+                self._mark_partial(state, reason)
+                return SupervisorDecision("report-writer", "Critic 失败且质量门槛未通过，生成部分报告", partial=True)
             return SupervisorDecision("failed", f"{agent} 无可用恢复路径", terminal=True)
 
         if agent == "planner":
@@ -351,31 +431,66 @@ class SupervisorAgent:
             if result.status == "needs_input":
                 if state.search_round < self.settings.max_search_rounds:
                     return SupervisorDecision("planner", "没有提取到有效证据，要求 Planner 改写查询")
-                state.partial = True
+                self._mark_partial(state, "检索轮次耗尽，仍未提取到可核验的正文证据")
             return SupervisorDecision("claim-verifier", "将独立证据产物交接给 Claim Verifier", partial=state.partial)
 
         if agent == "claim-verifier":
             if result.proposed_action == "search_more":
                 if state.search_round < self.settings.max_search_rounds:
                     return SupervisorDecision("planner", "证据质量门槛未通过，触发补充检索")
-                state.partial = True
-                return SupervisorDecision("critic", "达到检索轮次上限，交由 Critic 决定结论边界", partial=True)
+                return SupervisorDecision("critic", "达到检索轮次上限，交由 Critic 判断缺口是否阻断完成")
             return SupervisorDecision("critic", "证据质量门槛通过，进入独立批判审查")
 
         if agent == "critic":
             if result.proposed_action == "search_more":
-                if state.search_round < self.settings.max_search_rounds:
+                blocking_gaps = [
+                    str(item) for item in state.critique.get("blocking_gaps", [])
+                ]
+                exhausted = state.search_round >= self.settings.max_search_rounds
+                stagnant = state.stagnant_rounds > 0 or state.stagnant_core_rounds > 0
+                if not exhausted and not stagnant:
                     return SupervisorDecision("planner", "Critic 发现证据缺口，触发定向补检索")
-                state.partial = True
-                return SupervisorDecision("report-writer", "检索预算已耗尽，生成部分报告", partial=True)
+                self._add_critique_limitations(state)
+                if self._quality_gate_passed(state) and not blocking_gaps and not state.conflicts:
+                    reason = "补充检索没有新增有效覆盖" if stagnant else "检索预算已耗尽"
+                    self._add_limitations(state, reason)
+                    return SupervisorDecision(
+                        "report-writer",
+                        f"{reason}，但质量门槛已通过且无核心缺口；带局限说明完成报告",
+                    )
+                if blocking_gaps:
+                    partial_reason = "核心研究维度仍缺失：" + "；".join(blocking_gaps[:3])
+                elif state.conflicts:
+                    partial_reason = "仍存在未解决的证据冲突：" + "；".join(state.conflicts[:3])
+                else:
+                    partial_reason = "检索停止后，已核验主张、独立来源、覆盖率或引用率仍未达到质量门槛"
+                self._mark_partial(state, partial_reason)
+                return SupervisorDecision("report-writer", partial_reason, partial=True)
             if result.proposed_action == "revise_claims":
                 if state.revision_round < self.settings.max_revision_rounds:
                     state.revision_round += 1
                     return SupervisorDecision("claim-verifier", "Critic 驳回部分主张，返回 Verifier 修订")
-                state.partial = True
-                return SupervisorDecision("report-writer", "主张修订达到上限，生成部分报告", partial=True)
+                self._add_critique_limitations(state)
+                if self._quality_gate_passed(state) and not state.conflicts:
+                    self._add_limitations(state, "主张修订达到上限，报告仅采用其余已核验主张")
+                    return SupervisorDecision(
+                        "report-writer",
+                        "主张修订达到上限，但剩余已核验主张仍通过质量门槛",
+                    )
+                self._mark_partial(state, "主张修订达到上限，剩余已核验结果未通过质量门槛")
+                return SupervisorDecision("report-writer", state.partial_reason or "主张修订达到上限", partial=True)
             if str(result.metrics.get("decision")) == "partial":
-                state.partial = True
+                blocking_gaps = [
+                    str(item) for item in state.critique.get("blocking_gaps", [])
+                ]
+                reason = (
+                    "核心研究维度仍缺失：" + "；".join(blocking_gaps[:3])
+                    if blocking_gaps
+                    else str(state.critique.get("reason") or "Critic 判定核心结论仍不完整")
+                )
+                self._mark_partial(state, reason)
+            else:
+                self._add_critique_limitations(state)
             return SupervisorDecision("report-writer", "Critic 已确定报告边界，交接 Writer", partial=state.partial)
 
         if agent == "report-writer":

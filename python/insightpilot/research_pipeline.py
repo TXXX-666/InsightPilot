@@ -260,6 +260,14 @@ class ResearchPipeline:
                 state.next_agent = self._resume_agent(state)
                 resume_strategy = "failed_agent" if state.next_agent != "planner" else "replan"
                 state.partial = False
+                state.partial_reason = None
+                state.limitations = []
+                state.required_dimensions = []
+                state.optional_dimensions = []
+                state.covered_dimensions = []
+                state.blocking_dimensions = []
+                state.stagnant_rounds = 0
+                state.stagnant_core_rounds = 0
                 state.report = ""
                 state.critique = {}
                 state.gaps.append("用户要求在已有证据基础上继续改进")
@@ -309,6 +317,10 @@ class ResearchPipeline:
             steps += 1
             if steps > self.settings.max_agent_steps:
                 state.partial = True
+                state.partial_reason = "Multi-Agent 工作流达到最大执行步数"
+                state.limitations = list(
+                    dict.fromkeys(state.limitations + [state.partial_reason])
+                )
                 state.errors.append({"agent": "supervisor", "error": "max_agent_steps exceeded"})
                 state.next_agent = "report-writer" if state.evidence else "failed"
                 self.event(
@@ -338,6 +350,10 @@ class ResearchPipeline:
             raise RuntimeError("Multi-Agent 工作流失败，且没有可用于降级报告的证据")
         if not state.report:
             state.partial = True
+            state.partial_reason = state.partial_reason or "Report Writer 不可用，已改用证据模板生成报告"
+            state.limitations = list(
+                dict.fromkeys(state.limitations + [state.partial_reason])
+            )
             state.report = _evidence_fallback_report(
                 goal,
                 state.claims,
@@ -347,6 +363,7 @@ class ResearchPipeline:
                     "risks": ["部分 Agent 执行失败，报告由共享证据状态降级生成"],
                 },
                 partial=True,
+                limitations=state.limitations,
             )
             self.event(
                 task_id,
@@ -382,8 +399,16 @@ class ResearchPipeline:
                 1 for claim in state.claims if claim.get("status") == "mixed"
             ),
             "partial": state.partial,
+            "partial_reason": state.partial_reason,
+            "limitations": state.limitations,
+            "completion_type": "partial" if state.partial else (
+                "completed_with_limitations" if state.limitations else "completed"
+            ),
             "report": report,
         }
+        if state.partial and not state.partial_reason:
+            state.partial_reason = "研究核心质量门槛未全部通过"
+            result["partial_reason"] = state.partial_reason
         final_status = "partial" if state.partial else "completed"
         state.status = final_status
         state.next_agent = "completed"
@@ -399,7 +424,13 @@ class ResearchPipeline:
             "task.partial" if state.partial else "task.completed",
             "supervisor",
             "研究在预算边界内生成部分报告" if state.partial else "多智能体研究完成，报告和证据图已持久化",
-            {"report_path": str(report_path), "steps": steps, "coverage_score": state.coverage_score},
+            {
+                "report_path": str(report_path),
+                "steps": steps,
+                "coverage_score": state.coverage_score,
+                "partial_reason": state.partial_reason,
+                "limitations": state.limitations,
+            },
         )
         return result
 
@@ -517,6 +548,9 @@ class ResearchPipeline:
         elif agent_name == "critic":
             scoped.claims = list(state.claims)
             scoped.evidence = list(state.evidence)
+            scoped.research_plan = dict(state.research_plan)
+            scoped.required_dimensions = list(state.required_dimensions)
+            scoped.optional_dimensions = list(state.optional_dimensions)
             scoped.coverage_score = state.coverage_score
             scoped.citation_score = state.citation_score
             scoped.conflicts = list(state.conflicts)
@@ -526,6 +560,7 @@ class ResearchPipeline:
             scoped.critique = dict(state.critique)
             scoped.coverage_score = state.coverage_score
             scoped.citation_score = state.citation_score
+            scoped.limitations = list(state.limitations)
         return scoped
 
     def _supervisor_decision(
@@ -591,6 +626,19 @@ class ResearchPipeline:
                         query for query in state.queries if query not in state.previous_queries
                     )
                 state.research_plan = payload
+                if not state.required_dimensions:
+                    required = [
+                        str(item).strip()
+                        for item in payload.get("required_dimensions", [])
+                        if str(item).strip()
+                    ]
+                    state.required_dimensions = list(dict.fromkeys(required or [state.goal]))
+                    optional = [
+                        str(item).strip()
+                        for item in payload.get("optional_dimensions", [])
+                        if str(item).strip()
+                    ]
+                    state.optional_dimensions = list(dict.fromkeys(optional))
                 state.queries = [str(item) for item in payload.get("queries", [])]
                 state.search_round += 1
             elif kind == "search_results" and isinstance(payload, list):
@@ -606,12 +654,63 @@ class ResearchPipeline:
             elif kind == "evidence_set" and isinstance(payload, list):
                 state.evidence = payload
             elif kind == "claim_verification" and isinstance(payload, dict):
+                previous = dict(state.quality_snapshot)
                 state.claims = list(payload.get("claims", []))
                 state.conflicts = [str(item) for item in payload.get("conflicts", [])]
                 state.coverage_score = float(payload.get("coverage_score", 0))
                 state.citation_score = float(payload.get("citation_score", 0))
+                evidence_sources = {
+                    item.get("evidence_id"): item.get("source_id")
+                    for item in state.evidence
+                    if item.get("evidence_id") and item.get("source_id")
+                }
+                current: dict[str, float | int] = {
+                    "verified_claims": sum(
+                        1 for claim in state.claims if claim.get("status") == "verified"
+                    ),
+                    "unique_sources": len({
+                        evidence_sources.get(evidence_id)
+                        for claim in state.claims
+                        if claim.get("status") == "verified"
+                        for evidence_id in claim.get("evidence_ids", [])
+                        if evidence_sources.get(evidence_id)
+                    }),
+                    "coverage_score": state.coverage_score,
+                }
+                if previous:
+                    progressed = (
+                        int(current["verified_claims"]) > int(previous.get("verified_claims", 0))
+                        or int(current["unique_sources"]) > int(previous.get("unique_sources", 0))
+                        or float(current["coverage_score"]) > float(previous.get("coverage_score", 0)) + 0.02
+                    )
+                    state.stagnant_rounds = 0 if progressed else state.stagnant_rounds + 1
+                state.quality_snapshot = current
             elif kind == "critique" and isinstance(payload, dict):
                 state.critique = payload
+                covered = [
+                    str(item).strip()
+                    for item in payload.get("covered_dimensions", [])
+                    if str(item).strip()
+                ]
+                if len(covered) > len(state.covered_dimensions):
+                    state.stagnant_rounds = 0
+                state.covered_dimensions = list(dict.fromkeys(covered))
+                blocking_dimensions = sorted(
+                    {
+                        str(item).strip()
+                        for item in payload.get("blocking_dimensions", [])
+                        if str(item).strip()
+                    }
+                )
+                if state.blocking_dimensions and blocking_dimensions:
+                    state.stagnant_core_rounds = (
+                        state.stagnant_core_rounds + 1
+                        if blocking_dimensions == sorted(state.blocking_dimensions)
+                        else 0
+                    )
+                elif not blocking_dimensions:
+                    state.stagnant_core_rounds = 0
+                state.blocking_dimensions = blocking_dimensions
             elif kind == "report" and isinstance(payload, dict):
                 state.report = str(payload.get("markdown", ""))
 
@@ -704,8 +803,13 @@ class ResearchPipeline:
             f"冲突：{json.dumps(conflicts or [], ensure_ascii=False)}\n"
             f"已使用查询词：{json.dumps(previous_queries or [], ensure_ascii=False)}\n"
             f"Planner 私有历史：{private_history}\n"
+            "required_dimensions 只能列用户目标明确要求、缺失后无法回答原问题的维度；不得把模型自行补充的研究建议设为必选。"
+            "对于'调研某公司招聘岗位'这类宽泛目标，不得强制要求尚未发布的未来招聘周期、Offer规模、薪资、面试流程或职业路径。"
+            "optional_dimensions 可列有帮助但不阻断报告完成的扩展维度。"
+            "aspects 用于组织检索，可以同时包含必选与可选维度。"
             "避免重复旧查询；若是返工，生成能够直接补齐缺口的新查询。"
             "返回 JSON：{\"queries\":[...],\"aspects\":[...],"
+            "\"required_dimensions\":[...],\"optional_dimensions\":[...],"
             "\"completion_criteria\":[...],\"reason\":\"\"}。",
         )
         queries = [str(q).strip() for q in data.get("queries", []) if str(q).strip()][:5]
@@ -715,6 +819,26 @@ class ResearchPipeline:
         fresh = [query for query in queries if query.casefold() not in old]
         data["queries"] = fresh or queries
         data["aspects"] = [str(item) for item in data.get("aspects", [])][:8]
+        proposed_required = [
+            str(item).strip()
+            for item in data.get("required_dimensions", [])
+            if str(item).strip()
+        ][:6]
+        proposed_optional = [
+            str(item).strip()
+            for item in data.get("optional_dimensions", [])
+            if str(item).strip()
+        ][:8]
+        # The user goal is the only blocking contract. Planner-generated aspects
+        # guide breadth, but cannot silently make the acceptance criteria stricter.
+        data["required_dimensions"] = [goal.strip()]
+        data["optional_dimensions"] = list(
+            dict.fromkeys(
+                item
+                for item in proposed_required + proposed_optional + data["aspects"]
+                if item and item != goal.strip()
+            )
+        )[:8]
         data["completion_criteria"] = [
             str(item) for item in data.get("completion_criteria", [])
         ][:8]
@@ -917,7 +1041,9 @@ class ResearchPipeline:
         )
 
     def _select_verification_evidence(
-        self, evidence: list[dict[str, Any]]
+        self,
+        evidence: list[dict[str, Any]],
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Rank evidence while preserving source diversity and newer additions."""
         groups: dict[str, list[dict[str, Any]]] = {}
@@ -932,7 +1058,7 @@ class ResearchPipeline:
         )
         selected: list[dict[str, Any]] = []
         offset = 0
-        limit = max(1, self.settings.max_verification_evidence)
+        limit = max(1, limit or self.settings.max_verification_evidence)
         while len(selected) < limit:
             added = False
             for source_id in source_ids:
@@ -969,6 +1095,8 @@ class ResearchPipeline:
             "从本批证据提取 1-3 个重要主张，并逐条判断证据关系。"
             "supporting_quote 必须逐字来自对应证据原文，不得改写；"
             "没有精确引文时必须标记 irrelevant。"
+            "每个主张最多关联3条证据，supporting_quote最多160字，reason最多40字；"
+            "gaps、conflicts、suggested_queries各最多2项，不要输出分析过程。"
             "relation 只能是 entailed、contradicted、partial、irrelevant。返回 JSON："
             "{\"claims\":[{\"text\":\"\",\"confidence\":0.0,"
             "\"evidence\":[{\"evidence_id\":\"\",\"relation\":\"entailed\","
@@ -1142,13 +1270,20 @@ class ResearchPipeline:
                         str(item) for item in critique.get("suggested_queries", [])
                     ][:6],
                 }
-        selected = self._select_verification_evidence(evidence)
         processed_ids = self.db.completed_verification_evidence(
             task_id, self.settings.llm_model, VERIFICATION_PROMPT_VERSION
         )
-        pending = [
-            item for item in selected if str(item["evidence_id"]) not in processed_ids
+        new_evidence = [
+            item
+            for item in evidence
+            if str(item["evidence_id"]) not in processed_ids
         ]
+        verification_limit = (
+            self.settings.followup_verification_evidence
+            if existing_claims
+            else self.settings.max_verification_evidence
+        )
+        pending = self._select_verification_evidence(new_evidence, verification_limit)
         cached_batches = self.db.unapplied_verification_batches(
             task_id, self.settings.llm_model, VERIFICATION_PROMPT_VERSION
         )
@@ -1161,9 +1296,16 @@ class ResearchPipeline:
             f"正在分 {len(batches)} 批执行主张-证据语义核验",
             {
                 "available_evidence": len(evidence),
-                "selected_evidence": len(selected),
+                "selected_evidence": len(pending),
                 "new_evidence": len(pending),
-                "reused_evidence": len(selected) - len(pending),
+                "reused_evidence": len(
+                    {
+                        str(item["evidence_id"])
+                        for item in evidence
+                        if str(item["evidence_id"]) in processed_ids
+                    }
+                ),
+                "verification_limit": verification_limit,
                 "cached_batches": len(cached_batches),
                 "batch_size": batch_size,
                 "recovery_attempt": recovery_attempt,
@@ -1362,7 +1504,7 @@ class ResearchPipeline:
                 "conflict_count": len(result["conflicts"]),
                 "batch_count": len(batches),
                 "failed_parts": len(batch_errors),
-                "selected_evidence": len(selected),
+                "selected_evidence": len(pending),
             },
         )
         return result
@@ -1378,6 +1520,8 @@ class ResearchPipeline:
         evidence: list[dict[str, Any]],
         academic: bool = False,
         coverage_score: float = 0.0,
+        required_dimensions: list[str] | None = None,
+        optional_dimensions: list[str] | None = None,
         private_history: str = "",
     ) -> dict[str, Any]:
         self.event(task_id, "agent.started", "critic", "正在检查来源质量、证据冲突和结论边界")
@@ -1386,17 +1530,40 @@ class ResearchPipeline:
             if academic
             else ""
         )
+        compact_claims = [
+            {
+                "id": claim.get("claim_id"),
+                "text": claim.get("text"),
+                "status": claim.get("status"),
+                "confidence": claim.get("confidence"),
+                "evidence_ids": claim.get("evidence_ids", []),
+            }
+            for claim in claims
+        ]
+        source_type_counts: dict[str, int] = {}
+        for item in evidence:
+            kind = str(item.get("source_type", "unknown"))
+            source_type_counts[kind] = source_type_counts.get(kind, 0) + 1
         critique = await self.llm.json(
             RESEARCH_SYSTEM + "\n你当前是独立 Critic，有权驳回上游结果，但不能虚构缺口。",
             f"当前日期：{datetime.now(timezone.utc).date().isoformat()}\n"
-            f"研究目标：{goal}\n主张及语义核验：{json.dumps(claims, ensure_ascii=False)}\n"
-            f"来源类型：{json.dumps([e['source_type'] for e in evidence], ensure_ascii=False)}\n"
+            f"研究目标：{goal}\n已核验主张摘要：{json.dumps(compact_claims, ensure_ascii=False)}\n"
+            f"来源类型统计：{json.dumps(source_type_counts, ensure_ascii=False)}\n"
             f"自动覆盖评分：{coverage_score}\nCritic 私有历史：{private_history}\n"
+            f"Planner 确定的必选研究维度：{json.dumps(required_dimensions or [], ensure_ascii=False)}\n"
+            f"Planner 确定的可选研究维度：{json.dumps(optional_dimensions or [], ensure_ascii=False)}\n"
             "当前结构化主张列表是唯一有效版本；不得沿用历史中已经删除的主张或旧数量。"
             f"严格检查证据缺口、冲突、时效问题和来源偏差。{academic_checks}"
+            "只有 Planner 必选研究维度中明确要求、且会使核心结论不可用的缺口，才能放入 blocking_gaps。"
+            "blocking_gaps 中每项必须是对象，dimension 必须逐字复制一个 Planner 必选研究维度；无法对齐时只能放 advisory_gaps。"
+            "不得自行增加面试流程、职业路径、薪资、案例数量等研究范围；这类改进只能放入 advisory_gaps，不能触发 search_more。"
+            "search_more 必须至少包含一个 blocking_gaps；否则必须 accept。"
+            "最多返回2个 blocking_gaps、3个 advisory_gaps、3个 risks 和4个 suggested_queries；每项描述最多120字，不要输出分析过程。"
             "decision 只能是 accept、search_more、revise_claims、partial。"
             "只有实质问题才要求返工，并给出可直接搜索的新查询。返回 JSON："
             "{\"decision\":\"accept\",\"reason\":\"\",\"gaps\":[...],"
+            "\"blocking_gaps\":[{\"dimension\":\"\",\"description\":\"\"}],"
+            "\"advisory_gaps\":[...],\"covered_dimensions\":[...],"
             "\"risks\":[...],\"suggested_queries\":[...],\"overall_confidence\":0.0}。",
         )
         decision = str(critique.get("decision", "")).casefold()
@@ -1404,8 +1571,62 @@ class ResearchPipeline:
             confidence = float(critique.get("overall_confidence", 0) or 0)
             decision = "accept" if coverage_score >= self.settings.min_evidence_coverage and confidence >= 0.6 else "search_more"
         critique["decision"] = decision
-        critique["gaps"] = [str(item) for item in critique.get("gaps", [])]
-        critique["risks"] = [str(item) for item in critique.get("risks", [])]
+
+        def item_text(item: Any) -> str:
+            if isinstance(item, dict):
+                return str(
+                    item.get("description")
+                    or item.get("reason")
+                    or item.get("dimension")
+                    or ""
+                ).strip()
+            return str(item).strip()
+
+        required_lookup = {
+            str(item).strip().casefold(): str(item).strip()
+            for item in required_dimensions or []
+            if str(item).strip()
+        }
+        blocking_gaps: list[str] = []
+        blocking_dimensions: list[str] = []
+        advisory_gaps = [
+            text
+            for item in critique.get("advisory_gaps", [])
+            if (text := item_text(item))
+        ]
+        blocking_details: list[dict[str, str]] = []
+        for item in critique.get("blocking_gaps", []):
+            dimension = (
+                str(item.get("dimension", "")).strip()
+                if isinstance(item, dict)
+                else ""
+            )
+            description = item_text(item)
+            aligned_dimension = required_lookup.get(dimension.casefold())
+            if aligned_dimension and description:
+                blocking_gaps.append(description)
+                blocking_dimensions.append(aligned_dimension)
+                blocking_details.append(
+                    {"dimension": aligned_dimension, "description": description}
+                )
+            elif description:
+                advisory_gaps.append(description)
+
+        critique["gaps"] = [
+            text for item in critique.get("gaps", []) if (text := item_text(item))
+        ]
+        critique["blocking_gaps"] = list(dict.fromkeys(blocking_gaps))
+        critique["blocking_dimensions"] = list(dict.fromkeys(blocking_dimensions))
+        critique["blocking_details"] = blocking_details
+        critique["advisory_gaps"] = list(dict.fromkeys(advisory_gaps))
+        critique["covered_dimensions"] = [
+            text
+            for item in critique.get("covered_dimensions", [])
+            if (text := item_text(item))
+        ]
+        critique["risks"] = [
+            text for item in critique.get("risks", []) if (text := item_text(item))
+        ]
         critique["suggested_queries"] = [str(item) for item in critique.get("suggested_queries", [])][:6]
         self.event(task_id, "agent.completed", "critic", "批判性审查完成", critique)
         return critique
@@ -1422,6 +1643,7 @@ class ResearchPipeline:
         critique: dict[str, Any],
         academic: bool = False,
         partial: bool = False,
+        limitations: list[str] | None = None,
     ) -> str:
         self.event(task_id, "agent.started", "report-writer", "正在生成带可追溯引用的研究报告")
         verified_claims = [claim for claim in claims if claim.get("status", "verified") == "verified"]
@@ -1455,6 +1677,7 @@ class ResearchPipeline:
             f"当前日期：{datetime.now(timezone.utc).date().isoformat()}\n"
             f"目标：{goal}\n已通过语义核验的主张：{json.dumps(verified_claims, ensure_ascii=False)}\n"
             f"审查：{json.dumps(critique, ensure_ascii=False)}\n证据字典：{json.dumps(evidence_map, ensure_ascii=False)}\n"
+            f"必须披露的局限：{json.dumps(limitations or [], ensure_ascii=False)}\n"
             f"生成中文 Markdown 报告。{report_structure}"
             + ("当前任务达到循环或质量预算上限，必须在开头明确标记为部分报告。" if partial else "")
             + "每个事实后必须用 [证据ID] 标注；来源区必须列出对应真实 URL 和检索时间。"
@@ -1477,18 +1700,46 @@ class ResearchPipeline:
                 temperature=0.1,
                 max_tokens=self.settings.report_max_tokens,
             )
-        if report.strip() and not self._report_citations_valid(report, verified_claims, referenced_ids):
+        known_urls = {str(item.get("url")) for item in selected if item.get("url")}
+        if report.strip() and not self._report_citations_valid(
+            report, verified_claims, referenced_ids, known_urls
+        ):
             self.event(
                 task_id,
                 "verification.warning",
                 "report-writer",
-                "生成报告未通过引用完整性校验，已降级为证据模板报告",
+                "生成报告包含未知引用、未知 URL 或完全缺少有效引用，已降级为证据模板报告",
             )
             report = ""
+        elif report.strip():
+            omitted_claims = sum(
+                1
+                for claim in verified_claims
+                if not any(
+                    f"[{evidence_id}]" in report
+                    for evidence_id in claim.get("evidence_ids", [])
+                )
+            )
+            if omitted_claims:
+                self.event(
+                    task_id,
+                    "verification.notice",
+                    "report-writer",
+                    "报告正文未展开全部已核验主张；未展开主张仍保留在证据图中",
+                    {
+                        "omitted_verified_claims": omitted_claims,
+                        "verified_claims": len(verified_claims),
+                    },
+                )
         if not report.strip():
             self.event(task_id, "provider.warning", "report-writer", "报告模型连续返回空响应，已使用基于已核验证据的模板报告")
             report = _evidence_fallback_report(
-                goal, verified_claims, selected, critique, partial=partial
+                goal,
+                verified_claims,
+                selected,
+                critique,
+                partial=partial,
+                limitations=limitations,
             )
             self.event(task_id, "agent.completed", "report-writer", "证据模板报告生成完成", {"generation": "evidence_fallback"})
             return report
@@ -1500,18 +1751,26 @@ class ResearchPipeline:
         report: str,
         claims: list[dict[str, Any]],
         known_ids: set[str],
+        known_urls: set[str] | None = None,
     ) -> bool:
         attributable_claims = [claim for claim in claims if claim.get("text")]
         if attributable_claims and not known_ids:
             return False
-        for claim in attributable_claims:
-            ids = set(claim.get("evidence_ids", []))
-            if ids and not any(f"[{evidence_id}]" in report for evidence_id in ids):
-                return False
-        uuid_like = set(
+        id_like = set(
             re.findall(r"\[([0-9a-fA-F]{8}(?:-[0-9a-fA-F-]{8,})?)\]", report)
         )
-        return uuid_like.issubset(known_ids)
+        if not id_like.issubset(known_ids):
+            return False
+        if attributable_claims and not id_like.intersection(known_ids):
+            return False
+        if known_urls is not None:
+            report_urls = {
+                item.rstrip(".,;:!?，。；：！？、)]}")
+                for item in re.findall(r"https?://[^\s<>]+", report)
+            }
+            if not report_urls.issubset(known_urls):
+                return False
+        return True
 
     async def _write_report_tool(self, **kwargs: Any) -> str:
         return await self._write_report(**kwargs)
@@ -1574,6 +1833,7 @@ def _evidence_fallback_report(
     evidence: list[dict[str, Any]],
     critique: dict[str, Any],
     partial: bool = False,
+    limitations: list[str] | None = None,
 ) -> str:
     """Produce an attributable report when a provider returns no report text."""
     claims = [claim for claim in claims if claim.get("status", "verified") == "verified"]
@@ -1591,7 +1851,14 @@ def _evidence_fallback_report(
         lines.append(f"{index}. {claim.get('text', '未命名主张')} {evidence_ids}")
 
     lines.extend(["", "## 风险与未知项"])
-    risk_items = critique.get("gaps", []) + critique.get("risks", [])
+    risk_items = list(
+        dict.fromkeys(
+            list(limitations or [])
+            + critique.get("advisory_gaps", [])
+            + critique.get("gaps", [])
+            + critique.get("risks", [])
+        )
+    )
     for item in risk_items:
         lines.append(f"- {item}")
     if not risk_items:

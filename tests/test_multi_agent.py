@@ -176,7 +176,266 @@ def test_supervisor_routes_verifier_back_to_planner_until_budget():
         state, handoff, web_available=True, academic_available=False
     )
     assert decision.next_agent == "critic"
+    assert decision.partial is False
+    assert state.partial is False
+
+
+def quality_state(*, search_round=3, stagnant_rounds=0):
+    evidence = [
+        {"evidence_id": f"e{index}", "source_id": f"s{index}"}
+        for index in range(1, 4)
+    ]
+    claims = [
+        {
+            "text": f"Verified claim {index}",
+            "status": "verified",
+            "evidence_ids": [f"e{index}"],
+        }
+        for index in range(1, 4)
+    ]
+    return ResearchState(
+        "task",
+        "goal",
+        academic=False,
+        search_round=search_round,
+        stagnant_rounds=stagnant_rounds,
+        evidence=evidence,
+        claims=claims,
+        coverage_score=1.0,
+        citation_score=1.0,
+    )
+
+
+def test_supervisor_completes_at_budget_when_only_advisory_gaps_remain():
+    config = replace(settings, max_search_rounds=3)
+    supervisor = SupervisorAgent(config)
+    state = quality_state()
+    state.critique = {
+        "decision": "search_more",
+        "gaps": ["More examples would improve breadth"],
+        "blocking_gaps": [],
+        "advisory_gaps": ["More examples would improve breadth"],
+    }
+    result = AgentResult(
+        "critic",
+        "needs_input",
+        "search_more",
+        "advisory gap",
+        metrics={"decision": "search_more"},
+    )
+
+    decision = supervisor.decide(
+        state, result, web_available=True, academic_available=False
+    )
+
+    assert decision.next_agent == "report-writer"
+    assert decision.partial is False
+    assert state.partial is False
+    assert "More examples would improve breadth" in state.limitations
+
+
+def test_supervisor_stops_no_progress_loop_before_search_budget():
+    config = replace(settings, max_search_rounds=3)
+    supervisor = SupervisorAgent(config)
+    state = quality_state(search_round=2, stagnant_rounds=1)
+    state.critique = {
+        "decision": "search_more",
+        "gaps": ["Optional broader sample"],
+        "blocking_gaps": [],
+    }
+    result = AgentResult(
+        "critic",
+        "needs_input",
+        "search_more",
+        "no material progress",
+        metrics={"decision": "search_more"},
+    )
+
+    decision = supervisor.decide(
+        state, result, web_available=True, academic_available=False
+    )
+
+    assert decision.next_agent == "report-writer"
+    assert decision.partial is False
+    assert "补充检索没有新增有效覆盖" in state.limitations
+
+
+def test_supervisor_keeps_partial_for_missing_required_dimension():
+    config = replace(settings, max_search_rounds=3)
+    supervisor = SupervisorAgent(config)
+    state = quality_state()
+    state.critique = {
+        "decision": "search_more",
+        "gaps": ["No direct evidence for LLM-based airfoil design"],
+        "blocking_gaps": ["No direct evidence for LLM-based airfoil design"],
+    }
+    result = AgentResult(
+        "critic",
+        "needs_input",
+        "search_more",
+        "core objective missing",
+        metrics={"decision": "search_more"},
+    )
+
+    decision = supervisor.decide(
+        state, result, web_available=True, academic_available=False
+    )
+
+    assert decision.next_agent == "report-writer"
     assert decision.partial is True
+    assert state.partial_reason
+    assert "LLM-based airfoil design" in state.partial_reason
+
+
+@pytest.mark.asyncio
+async def test_critic_cannot_expand_scope_after_quality_gate_passes(database, tmp_path):
+    config = replace(
+        settings,
+        db_path=tmp_path / "multi-agent.db",
+        report_dir=tmp_path / "reports",
+    )
+    pipeline = ResearchPipeline(database, config)
+
+    async def expanded_scope_critique(**kwargs):
+        return {
+            "decision": "search_more",
+            "reason": "Add optional interview and salary sections",
+            "gaps": ["Interview process", "Salary history"],
+            "blocking_gaps": [],
+            "advisory_gaps": ["Interview process", "Salary history"],
+            "risks": [],
+            "suggested_queries": ["salary history"],
+            "overall_confidence": 0.9,
+        }
+
+    pipeline.tools._tools["critique_research"] = expanded_scope_critique
+    state = quality_state()
+    state.required_dimensions = ["Job responsibilities", "Core skills"]
+    agent = pipeline.agents["critic"]
+
+    result = await agent.execute(state, AgentContext("task", agent.spec))
+
+    assert result.status == "completed"
+    assert result.proposed_action == "write_report"
+    assert result.metrics["decision"] == "accept"
+
+
+@pytest.mark.asyncio
+async def test_planner_aspects_cannot_expand_blocking_contract(database, tmp_path):
+    pipeline = ResearchPipeline(database, replace(settings, db_path=tmp_path / "db.sqlite"))
+
+    async def expanded_plan(*args, **kwargs):
+        return {
+            "queries": ["company jobs"],
+            "aspects": ["Job categories", "Future hiring cycle", "Salary"],
+            "required_dimensions": ["Future hiring cycle", "Salary"],
+            "optional_dimensions": [],
+            "completion_criteria": [],
+        }
+
+    pipeline.llm.json = expanded_plan
+    goal = "Research the company's job openings"
+    plan = await pipeline._create_plan(goal)
+
+    assert plan["required_dimensions"] == [goal]
+    assert "Future hiring cycle" in plan["optional_dimensions"]
+    assert "Salary" in plan["optional_dimensions"]
+
+
+@pytest.mark.asyncio
+async def test_critic_demotes_blocker_not_aligned_to_user_goal(database, tmp_path):
+    pipeline = ResearchPipeline(database, replace(settings, db_path=tmp_path / "db.sqlite"))
+    task_id = database.create_task("Research company jobs")
+
+    async def expanded_critique(*args, **kwargs):
+        return {
+            "decision": "search_more",
+            "reason": "Salary is unavailable",
+            "gaps": [],
+            "blocking_gaps": [
+                {"dimension": "Salary", "description": "No salary history"}
+            ],
+            "advisory_gaps": [],
+            "covered_dimensions": [],
+            "risks": [],
+            "suggested_queries": [],
+            "overall_confidence": 0.8,
+        }
+
+    pipeline.llm.json = expanded_critique
+    critique = await pipeline._critique(
+        task_id,
+        "Research company jobs",
+        [],
+        [],
+        coverage_score=1.0,
+        required_dimensions=["Research company jobs"],
+    )
+
+    assert critique["blocking_gaps"] == []
+    assert critique["blocking_dimensions"] == []
+    assert critique["advisory_gaps"] == ["No salary history"]
+
+
+def test_repeated_core_gap_marks_research_as_stagnant(database, tmp_path):
+    pipeline = ResearchPipeline(database, replace(settings, db_path=tmp_path / "db.sqlite"))
+    state = ResearchState("task", "goal", academic=False)
+    critique = AgentResult(
+        "critic",
+        "needs_input",
+        "search_more",
+        "same blocker",
+        artifacts=[{
+            "kind": "critique",
+            "payload": {
+                "decision": "search_more",
+                "blocking_gaps": ["Missing core evidence"],
+                "blocking_dimensions": ["goal"],
+            },
+        }],
+    )
+
+    pipeline._apply_agent_result(state, critique)
+    pipeline._apply_agent_result(state, critique)
+
+    assert state.stagnant_core_rounds == 1
+
+
+def test_report_citation_gate_allows_omitted_non_core_claims():
+    known_id = "11111111-1111-1111-1111-111111111111"
+    omitted_id = "22222222-2222-2222-2222-222222222222"
+    claims = [
+        {"text": "Included", "evidence_ids": [known_id]},
+        {"text": "Not expanded in report", "evidence_ids": [omitted_id]},
+    ]
+    report = f"Finding [{known_id}]\n\nhttps://example.com/source"
+
+    assert ResearchPipeline._report_citations_valid(
+        report,
+        claims,
+        {known_id, omitted_id},
+        {"https://example.com/source"},
+    )
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        "Unknown evidence [99999999-9999-9999-9999-999999999999]",
+        "Known [11111111-1111-1111-1111-111111111111] https://invented.example/source",
+        "No evidence citation at all",
+    ],
+)
+def test_report_citation_gate_rejects_hard_integrity_errors(report):
+    known_id = "11111111-1111-1111-1111-111111111111"
+    claims = [{"text": "Included", "evidence_ids": [known_id]}]
+
+    assert not ResearchPipeline._report_citations_valid(
+        report,
+        claims,
+        {known_id},
+        {"https://example.com/source"},
+    )
 
 
 @pytest.mark.asyncio
@@ -464,6 +723,7 @@ async def test_claim_verifier_only_processes_new_evidence_across_rounds(database
         llm_model="test",
         verifier_batch_size=2,
         max_verification_evidence=6,
+        followup_verification_evidence=2,
     )
     pipeline = ResearchPipeline(database, config)
     task_id = database.create_task("incremental verification")
@@ -480,7 +740,7 @@ async def test_claim_verifier_only_processes_new_evidence_across_rounds(database
     )
     assert len(calls) == 2
 
-    add_verification_evidence(database, task_id, ["e5", "e6"])
+    add_verification_evidence(database, task_id, ["e5", "e6", "e7", "e8"])
     second = await pipeline._verify_claims_tool(
         task_id,
         "incremental verification",
@@ -489,11 +749,12 @@ async def test_claim_verifier_only_processes_new_evidence_across_rounds(database
     )
 
     assert len(calls) == 3
-    assert calls[-1] == {"e5", "e6"}
+    assert len(calls[-1]) == 2
+    assert calls[-1].issubset({"e5", "e6", "e7", "e8"})
     assert len(second["claims"]) == 6
-    assert database.completed_verification_evidence(
+    assert len(database.completed_verification_evidence(
         task_id, "test", "claim-verifier-v2"
-    ) == {"e1", "e2", "e3", "e4", "e5", "e6"}
+    )) == 6
 
 
 @pytest.mark.asyncio
