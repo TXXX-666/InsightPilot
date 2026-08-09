@@ -1,0 +1,40 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      INSIGHTPILOT_HOST: 0.0.0.0
+      INSIGHTPILOT_API_URL: http://api:8000
+      INSIGHTPILOT_DB_PATH: /app/data/insightpilot.db
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health',headers={'Authorization':'Bearer '+os.getenv('INSIGHTPILOT_API_TOKEN','')}); urllib.request.urlopen(r,timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      INSIGHTPILOT_API_URL: http://api:8000
+      INSIGHTPILOT_API_TOKEN: ${INSIGHTPILOT_API_TOKEN}
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["streamlit", "run", "/app/frontend/app.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true"]
+    ports:
+      - "127.0.0.1:8501:8501"
