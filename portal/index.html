@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AI 应用项目入口：InsightPilot 多智能体研究平台与慧眼医助 RAG。">
+  <title>AI Workspace | 项目入口</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="返回项目入口首页">
+      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>AI Workspace</span>
+    </a>
+    <span class="service-status"><span class="status-dot" aria-hidden="true"></span>服务运行中</span>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">PROJECT CONSOLE</p>
+      <h1 id="page-title">选择要进入的项目</h1>
+      <p>两个应用独立运行，共用同一域名入口。</p>
+    </section>
+
+    <section class="project-grid" aria-label="可用项目">
+      <article class="project-card project-card--insight">
+        <div class="preview">
+          <img src="assets/insightpilot-preview.png" alt="InsightPilot 登录界面预览" width="1280" height="720">
+          <div class="preview-label"><span class="status-dot" aria-hidden="true"></span>已上线</div>
+        </div>
+        <div class="project-content">
+          <div class="project-heading">
+            <span class="project-icon project-icon--insight" aria-hidden="true">IP</span>
+            <div>
+              <h2>InsightPilot</h2>
+              <p>多智能体实时情报研究平台</p>
+            </div>
+          </div>
+          <ul class="tags" aria-label="核心能力">
+            <li>Multi-Agent</li>
+            <li>实时检索</li>
+            <li>证据核验</li>
+          </ul>
+          <p class="description">从研究规划、网络检索到主张核验与报告生成，完整追踪每个 Agent 的执行过程。</p>
+          <a class="project-action" href="https://app.insightpilot-ai.top/">
+            打开 InsightPilot <span aria-hidden="true">&#8594;</span>
+          </a>
+        </div>
+      </article>
+
+      <article class="project-card project-card--eye">
+        <div class="preview">
+          <img src="assets/eye-preview.png" alt="慧眼医助眼科问答界面预览" width="1280" height="720">
+          <div class="preview-label preview-label--pending">部署准备中</div>
+        </div>
+        <div class="project-content">
+          <div class="project-heading">
+            <span class="project-icon project-icon--eye" aria-hidden="true">EYE</span>
+            <div>
+              <h2>慧眼医助</h2>
+              <p>眼科医疗知识库 RAG 助手</p>
+            </div>
+          </div>
+          <ul class="tags" aria-label="核心能力">
+            <li>Hybrid RAG</li>
+            <li>BM25 + Dense</li>
+            <li>Rerank</li>
+          </ul>
+          <p class="description">基于眼科知识库进行混合检索、重排与引用溯源，提供带参考来源的医疗知识问答。</p>
+          <span class="project-action project-action--disabled" aria-disabled="true">
+            部署后开放
+          </span>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    <span>insightpilot-ai.top</span>
+    <span>AI application portfolio</span>
+  </footer>
+</body>
+</html>
