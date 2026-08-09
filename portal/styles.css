@@ -173,11 +173,6 @@ main {
   backdrop-filter: blur(8px);
 }
 
-.preview-label--pending {
-  color: #fff;
-  background: rgba(88, 48, 26, 0.9);
-}
-
 .project-content {
   padding: 24px;
 }
@@ -270,6 +265,21 @@ main {
 .project-action:focus-visible {
   border-color: var(--green);
   background: var(--green);
+}
+
+.project-action--eye {
+  border-color: #b63d3d;
+  background: #b63d3d;
+}
+
+.project-action--eye:hover,
+.project-action--eye:focus-visible {
+  border-color: var(--coral);
+  background: var(--coral);
+}
+
+.project-action--eye:focus-visible {
+  outline-color: rgba(217, 76, 76, 0.22);
 }
 
 .project-action:focus-visible {
