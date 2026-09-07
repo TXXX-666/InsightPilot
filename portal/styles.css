@@ -300,12 +300,6 @@ main {
   outline-color: rgba(47, 109, 161, 0.22);
 }
 
-.preview-label--pending {
-  color: #eef7ff;
-  border-color: rgba(255, 255, 255, 0.3);
-  background: rgba(33, 77, 113, 0.9);
-}
-
 .project-action--eye:focus-visible {
   outline-color: rgba(217, 76, 76, 0.22);
 }
