@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="AI 应用项目入口：InsightPilot 多智能体研究平台与慧眼医助 RAG。">
+  <meta name="description" content="AI 应用项目入口：InsightPilot、慧眼医助与政治理论题库问答。">
   <title>AI Workspace | 项目入口</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -20,7 +20,7 @@
     <section class="intro" aria-labelledby="page-title">
       <p class="eyebrow">PROJECT CONSOLE</p>
       <h1 id="page-title">选择要进入的项目</h1>
-      <p>两个应用独立运行，共用同一域名入口。</p>
+      <p>三个应用独立运行，共用同一域名入口。</p>
     </section>
 
     <section class="project-grid" aria-label="可用项目">
@@ -70,6 +70,31 @@
           <p class="description">基于眼科知识库进行混合检索、重排与引用溯源，提供带参考来源的医疗知识问答。</p>
           <a class="project-action project-action--eye" href="https://eye.insightpilot-ai.top/">
             打开慧眼医助 <span aria-hidden="true">&#8594;</span>
+          </a>
+        </div>
+      </article>
+
+      <article class="project-card project-card--quiz">
+        <div class="preview">
+          <img src="assets/quiz-preview.png" alt="政治理论题库查询界面预览" width="1280" height="720">
+          <div class="preview-label preview-label--pending">待部署</div>
+        </div>
+        <div class="project-content">
+          <div class="project-heading">
+            <span class="project-icon project-icon--quiz" aria-hidden="true">QA</span>
+            <div>
+              <h2>政治理论题库</h2>
+              <p>4180 道原题结构化检索</p>
+            </div>
+          </div>
+          <ul class="tags" aria-label="核心能力">
+            <li>精确匹配</li>
+            <li>FTS5</li>
+            <li>答案溯源</li>
+          </ul>
+          <p class="description">解析单选、多选与判断题，优先确定性返回题库答案；相似题存在歧义时由用户确认。</p>
+          <a class="project-action project-action--quiz" href="https://quiz.insightpilot-ai.top/">
+            打开政治理论题库 <span aria-hidden="true">&#8594;</span>
           </a>
         </div>
       </article>
